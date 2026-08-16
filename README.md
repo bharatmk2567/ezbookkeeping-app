@@ -20,13 +20,18 @@ cd android && ./gradlew assembleDebug
 
 ## Sync with Upstream
 
-### Automated (GitHub Actions)
-The workflow runs **every Monday at 9:00 UTC** and:
-1. Checks for upstream changes
-2. Creates a PR with updates if changes exist
-3. Verifies the build succeeds
+### Automated Release (GitHub Actions)
+The **Release APK from Upstream** workflow runs **every 6 hours** and:
+1. Checks for new ezBookkeeping upstream releases (`v*` tags)
+2. If a new release exists, pulls the code changes
+3. Applies our Capacitor modifications on top
+4. Builds the app
+5. Publishes the APK as a GitHub **Release** (no signing key needed — uses Android debug keystore)
 
-You can also trigger it manually from the **Actions** tab.
+Release tags look like `upstream-v1.6.1`, APKs are named `ezBookkeeping-<version>-debug.apk`.
+
+### Sync-Only Workflow (GitHub Actions)
+The **Sync Upstream ezBookkeeping** workflow runs **every Monday** and creates a PR with changes (doesn't release).
 
 ### Manual
 ```bash

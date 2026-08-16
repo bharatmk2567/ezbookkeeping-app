@@ -1,0 +1,249 @@
+name: Release APK from Upstream
+
+on:
+  schedule:
+    # Check for new upstream releases every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild current upstream release'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_URL: https://github.com/mayswind/ezbookkeeping.git
+  RELEASE_PREFIX: upstream
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest upstream release
+        id: upstream
+        run: |
+          RESPONSE=$(curl -s "https://api.github.com/repos/mayswind/ezbookkeeping/releases/latest")
+          TAG=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))")
+          if [ -z "$TAG" ]; then
+            echo "::error::Could not determine latest upstream release"
+            exit 1
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "Latest upstream release: $TAG"
+
+      - name: Check if already released
+        id: check
+        run: |
+          # We tag our repo with "upstream-<tag>" after each release
+          EXISTING=$(git tag -l "${RELEASE_PREFIX}-${TAG}")
+          if [ -n "$EXISTING" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Version $TAG already released (tag: $EXISTING). Nothing to do."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "New upstream version detected: $TAG"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Java 21
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        if: steps.check.outputs.skip == 'false'
+        uses: android-actions/setup-android@v3
+
+      - name: Clone upstream at release tag
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git clone --depth 1 --branch "$TAG" $UPSTREAM_URL /tmp/upstream
+          UPSTREAM_SHA=$(cd /tmp/upstream && git rev-parse --short HEAD)
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+          echo "Cloned upstream $TAG @ $UPSTREAM_SHA"
+
+      - name: Backup Capacitor modifications
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          BACKUP_DIR="/tmp/backup_$(date +%s)"
+          mkdir -p "$BACKUP_DIR"
+
+          CUSTOM_FILES=(
+            "src/lib/capacitor.ts"
+            "src/MobileApp.vue"
+            "src/core/setting.ts"
+            "src/stores/setting.ts"
+            "src/views/mobile/transactions/EditPage.vue"
+            "src/views/mobile/ApplicationLockPage.vue"
+            "src/views/mobile/UnlockPage.vue"
+            "src/components/mobile/AIImageRecognitionSheet.vue"
+            "capacitor.config.ts"
+          )
+
+          for file in "${CUSTOM_FILES[@]}"; do
+            if [ -f "app/$file" ]; then
+              mkdir -p "$BACKUP_DIR/$(dirname "$file")"
+              cp "app/$file" "$BACKUP_DIR/$file"
+            fi
+          done
+
+          echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
+          echo "Backup saved to: $BACKUP_DIR"
+
+      - name: Copy upstream files
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          COPY_ITEMS=(
+            "src"
+            "package.json"
+            "package-lock.json"
+            "vite.config.ts"
+            "tsconfig.json"
+            "eslint.config.mjs"
+            "postcss.config.js"
+            "vitest.config.ts"
+            "public"
+            "LICENSE"
+            "contributors.json"
+            "third-party-dependencies.json"
+          )
+
+          for item in "${COPY_ITEMS[@]}"; do
+            if [ -e "/tmp/upstream/$item" ]; then
+              rm -rf "app/$item"
+              cp -r "/tmp/upstream/$item" "app/$item"
+              echo "Updated: $item"
+            fi
+          done
+
+      - name: Restore Capacitor modifications
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          for file in \
+            "src/lib/capacitor.ts" \
+            "src/MobileApp.vue" \
+            "src/core/setting.ts" \
+            "src/stores/setting.ts" \
+            "src/views/mobile/transactions/EditPage.vue" \
+            "src/views/mobile/ApplicationLockPage.vue" \
+            "src/views/mobile/UnlockPage.vue" \
+            "src/components/mobile/AIImageRecognitionSheet.vue" \
+            "capacitor.config.ts"
+          do
+            if [ -f "$BACKUP_DIR/$file" ]; then
+              mkdir -p "$(dirname "app/$file")"
+              cp "$BACKUP_DIR/$file" "app/$file"
+              echo "Restored: $file"
+            fi
+          done
+
+      - name: Install dependencies
+        if: steps.check.outputs.skip == 'false'
+        working-directory: app
+        run: npm install
+
+      - name: Build web assets
+        if: steps.check.outputs.skip == 'false'
+        working-directory: app
+        run: NODE_ENV=production npx vite build
+
+      - name: Sync Capacitor
+        if: steps.check.outputs.skip == 'false'
+        working-directory: app
+        run: npx cap sync android
+
+      - name: Build Android debug APK
+        if: steps.check.outputs.skip == 'false'
+        working-directory: app/android
+        run: ./gradlew assembleDebug
+
+      - name: Prepare APK for release
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          VERSION=$(node -p "require('./app/package.json').version")
+          SOURCE_APK="app/android/app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="ezBookkeeping-${VERSION}-debug.apk"
+
+          if [ ! -f "$SOURCE_APK" ]; then
+            echo "::error::APK not found at $SOURCE_APK"
+            exit 1
+          fi
+
+          cp "$SOURCE_APK" "$RELEASE_APK"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "RELEASE_APK=$RELEASE_APK" >> $GITHUB_ENV
+          echo "Prepared: $RELEASE_APK ($(du -h "$RELEASE_APK" | cut -f1))"
+
+      - name: Commit synced code
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: sync upstream ezBookkeeping $TAG" || echo "No changes to commit"
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Tag release
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git tag "${RELEASE_PREFIX}-${TAG}"
+          git push origin "${RELEASE_PREFIX}-${TAG}"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > /tmp/release_notes.md <<'EOF'
+          ## ezBookkeeping Android App
+
+          Automatically built from the latest [ezBookkeeping upstream release](https://github.com/mayswind/ezbookkeeping/releases).
+
+          ### Download
+          - **{RELEASE_APK}** — Android debug APK (unsigned, sideload-friendly)
+
+          ### What's inside
+          - Full ezBookkeeping web app (all features)
+          - Native Capacitor shell
+          - Camera (receipt scanning), biometric unlock, notifications, geolocation
+
+          ### Install
+          1. Download the APK
+          2. Enable "Install unknown apps" for your browser/file manager
+          3. Open the APK and install
+
+          > Note: This is a **debug build** using the Android debug keystore. For Play Store distribution, a signed release build is required.
+
+          ---
+          *Automated by GitHub Actions*
+          EOF
+          sed -i "s/{RELEASE_APK}/${RELEASE_APK}/g" /tmp/release_notes.md
+          gh release create "${RELEASE_PREFIX}-${TAG}" \
+            "$RELEASE_APK" \
+            --title "ezBookkeeping Android App ${TAG}" \
+            --notes-file /tmp/release_notes.md
+
+      - name: Already up to date
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Latest upstream release already packaged. No action taken."
