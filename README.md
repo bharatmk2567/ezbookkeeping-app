@@ -114,7 +114,7 @@ ezbookkeeping_app/
 
 ## Quick Start (Build Locally)
 
-Prerequisites: **Node.js 20+**, **Java 21**, **Android SDK**.
+Prerequisites: **Node.js 22+** (Capacitor CLI requires ≥22), **Java 21**, **Android SDK**.
 
 ```bash
 # 1. Install web app dependencies
