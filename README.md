@@ -86,19 +86,25 @@ The web app's mobile interface (Framework7) already provides native-style intera
 ```
 ezbookkeeping_app/
 ├── .github/workflows/
-│   ├── release-upstream.yml   # Auto-builds & publishes APK on upstream releases
+│   ├── release-upstream.yml   # Auto-builds & publishes APK when upstream changes
 │   └── sync-upstream.yml      # Weekly PR sync of upstream code changes
 ├── app/                       # Capacitor project root
-│   ├── capacitor.config.ts    # Native shell configuration
+│   ├── capacitor.config.ts    # Native shell configuration (ours)
 │   ├── package.json           # Web app + Capacitor dependencies
 │   ├── src/                   # ezBookkeeping web app source (Vue 3)
 │   │   ├── MobileApp.vue      # Mobile app entry (Capacitor-aware)
-│   │   ├── lib/capacitor.ts   # ⭐ Our native feature bridge
+│   │   ├── lib/capacitor.ts   # ⭐ Our native feature bridge (ours)
 │   │   ├── views/mobile/      # Framework7 mobile screens
 │   │   ├── stores/            # Pinia state management
 │   │   └── ...                # (copied from upstream)
 │   └── android/               # Native Android project (Gradle)
 │       └── app/build/outputs/apk/debug/app-debug.apk  ← the APK
+├── vendor-base/               # Pristine upstream copies of our 7 modified files
+│                               # (used as merge base during syncs)
+├── scripts/
+│   ├── sync-capacitor-mods.sh # 3-way merge: re-apply our changes onto upstream
+│   ├── update-vendor-base.sh  # Refresh vendor-base after a successful sync
+│   └── install-capacitor-deps.sh # Re-install Capacitor plugins after upstream overwrite
 ├── plan.md                    # Detailed implementation plan
 ├── sync-upstream.sh           # Manual upstream sync script
 └── README.md                  # This file
@@ -155,21 +161,30 @@ This project has a **fully automated release pipeline** — you don't have to do
 
 **Workflow: `release-upstream.yml`** (runs every 6 hours, or on demand from the Actions tab)
 
-1. Checks the latest ezBookkeeping upstream release (`v1.6.x`, `v1.7.x`, …) via the GitHub API.
-2. If it's a version we haven't packaged yet, it:
-   - Clones the upstream code at that release tag
-   - Backs up & re-applies our Capacitor modifications
-   - Installs dependencies and builds the web assets
+1. Checks the latest ezBookkeeping upstream `main` HEAD via git.
+2. If the upstream code changed since our last build, it:
+   - Clones the latest upstream code
+   - Re-applies our Capacitor modifications via **3-way merge**
+   - Installs dependencies (including Capacitor plugins) and builds the web assets
    - Syncs to Android and builds the debug APK
    - **Creates a GitHub Release** with the APK attached
-3. Already-packaged versions are skipped (tracked via `upstream-v<version>` git tags).
+3. Already-built upstream commits are skipped (tracked via `upstream-<sha>` git tags).
 
-**Result:** Every time ezBookkeeping ships a new version, you get a fresh `ezBookkeeping-<version>-debug.apk` release automatically.
+**Result:** Every time ezBookkeeping ships new code, you get a fresh `ezBookkeeping-<version>-debug.apk` release automatically.
 
 ### GitHub Release Format
-- **Release tag:** `upstream-v1.6.1`
-- **APK file:** `ezBookkeeping-1.6.1-debug.apk`
+- **Release tag:** `upstream-<short-sha>`
+- **APK file:** `ezBookkeeping-<version>-debug.apk`
 - **Notes:** auto-generated install instructions
+
+### How our changes survive the sync
+Our Capacitor integration touches 7 upstream files plus 2 files that are entirely ours. Instead of blindly overwriting, the sync uses a **3-way merge** (`scripts/sync-capacitor-mods.sh`):
+
+- **base** = pristine upstream version our changes were based on (`vendor-base/`)
+- **ours** = our modified version (committed)
+- **theirs** = fresh upstream code
+
+If upstream changed the same code, the merge combines both sides. If they conflict, the workflow **fails loudly** (instead of shipping a broken build) and the conflict must be resolved and the `vendor-base` refreshed via `scripts/update-vendor-base.sh`.
 
 ---
 
@@ -182,10 +197,10 @@ The **sync** workflow creates a PR every Monday with upstream code changes (buil
 ```bash
 ./sync-upstream.sh
 ```
-This clones/updates upstream, backs up our Capacitor modifications, copies the fresh source, restores our changes, and rebuilds everything.
+This clones/updates upstream, copies the fresh source, re-applies our Capacitor modifications via 3-way merge, reinstalls dependencies (including Capacitor plugins), and rebuilds everything.
 
 ### How conflicts are avoided
-Our Capacitor integration touches only **8 known files** (see below). The sync scripts back those files up before copying upstream, then restore them afterward — so upstream updates flow in without clobbering our native integrations.
+Our Capacitor integration touches only **7 known files** (see below). The sync performs a 3-way merge of each against the pristine upstream base (`vendor-base/`), so upstream updates flow in without clobbering our native integrations. Files that are entirely ours (`src/lib/capacitor.ts`, `capacitor.config.ts`) are simply re-copied.
 
 ---
 
@@ -211,20 +226,20 @@ Our Capacitor integration touches only **8 known files** (see below). The sync s
 
 ## Modified Files vs Upstream
 
-These are the only files where we add native behavior on top of the upstream code:
+These are the files where we add native behavior on top of the upstream code. They're merged during every sync via `scripts/sync-capacitor-mods.sh`:
 
-| File | What we changed |
-|------|-----------------|
-| `app/src/lib/capacitor.ts` | **New** — native feature bridge module |
-| `app/src/MobileApp.vue` | Capacitor initialization (status bar, splash, keyboard) |
-| `app/src/core/setting.ts` | Added `applicationLockBiometric` setting |
-| `app/src/stores/setting.ts` | Added `setApplicationLockBiometric` method |
-| `app/src/views/mobile/transactions/EditPage.vue` | Native camera for receipt photos |
-| `app/src/views/mobile/ApplicationLockPage.vue` | Biometric auth toggle |
-| `app/src/views/mobile/UnlockPage.vue` | Biometric unlock |
-| `app/src/components/mobile/AIImageRecognitionSheet.vue` | Native camera for AI receipt recognition |
-| `app/capacitor.config.ts` | **New** — Capacitor configuration |
-| `app/android/.../AndroidManifest.xml` | Native permissions (camera, biometrics, location, etc.) |
+| File | What we changed | Sync handling |
+|------|-----------------|---------------|
+| `app/src/lib/capacitor.ts` | Native feature bridge | Own file — always re-copied |
+| `app/capacitor.config.ts` | Capacitor configuration | Own file — always re-copied |
+| `app/src/MobileApp.vue` | Capacitor initialization (status bar, splash, keyboard) | 3-way merge |
+| `app/src/core/setting.ts` | Added `applicationLockBiometric` setting | 3-way merge |
+| `app/src/stores/setting.ts` | Added `setApplicationLockBiometric` method | 3-way merge |
+| `app/src/views/mobile/transactions/EditPage.vue` | Native camera for receipt photos | 3-way merge |
+| `app/src/views/mobile/ApplicationLockPage.vue` | Biometric auth toggle | 3-way merge |
+| `app/src/views/mobile/UnlockPage.vue` | Biometric unlock | 3-way merge |
+| `app/src/components/mobile/AIImageRecognitionSheet.vue` | Native camera for AI receipt recognition | 3-way merge |
+| `app/android/.../AndroidManifest.xml` | Native permissions (camera, biometrics, location, etc.) | Kept as-is (never overwritten) |
 
 ---
 

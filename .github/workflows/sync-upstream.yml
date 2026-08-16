@@ -18,12 +18,11 @@ permissions:
 
 env:
   UPSTREAM_URL: https://github.com/mayswind/ezbookkeeping.git
-  UPSTREAM_BRANCH: main
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout current repo
@@ -35,8 +34,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/package-lock.json
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -49,39 +46,12 @@ jobs:
 
       - name: Clone upstream
         run: |
-          git clone --depth 50 $UPSTREAM_URL /tmp/upstream
+          git clone --depth 1 $UPSTREAM_URL /tmp/upstream
           UPSTREAM_SHA=$(cd /tmp/upstream && git rev-parse --short HEAD)
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           echo "Upstream latest: $UPSTREAM_SHA"
 
-      - name: Backup Capacitor modifications
-        run: |
-          BACKUP_DIR="/tmp/backup_$(date +%s)"
-          mkdir -p "$BACKUP_DIR"
-
-          CUSTOM_FILES=(
-            "src/lib/capacitor.ts"
-            "src/MobileApp.vue"
-            "src/core/setting.ts"
-            "src/stores/setting.ts"
-            "src/views/mobile/transactions/EditPage.vue"
-            "src/views/mobile/ApplicationLockPage.vue"
-            "src/views/mobile/UnlockPage.vue"
-            "src/components/mobile/AIImageRecognitionSheet.vue"
-            "capacitor.config.ts"
-          )
-
-          for file in "${CUSTOM_FILES[@]}"; do
-            if [ -f "app/$file" ]; then
-              mkdir -p "$BACKUP_DIR/$(dirname "$file")"
-              cp "app/$file" "$BACKUP_DIR/$file"
-            fi
-          done
-
-          echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
-          echo "Backup saved to: $BACKUP_DIR"
-
-      - name: Copy upstream files
+      - name: Copy upstream files into app/
         run: |
           COPY_ITEMS=(
             "src"
@@ -106,30 +76,13 @@ jobs:
             fi
           done
 
-      - name: Restore Capacitor modifications
+      - name: Apply Capacitor modifications (3-way merge)
         run: |
-          for file in \
-            "src/lib/capacitor.ts" \
-            "src/MobileApp.vue" \
-            "src/core/setting.ts" \
-            "src/stores/setting.ts" \
-            "src/views/mobile/transactions/EditPage.vue" \
-            "src/views/mobile/ApplicationLockPage.vue" \
-            "src/views/mobile/UnlockPage.vue" \
-            "src/components/mobile/AIImageRecognitionSheet.vue" \
-            "capacitor.config.ts"
-          do
-            if [ -f "$BACKUP_DIR/$file" ]; then
-              mkdir -p "$(dirname "app/$file")"
-              cp "$BACKUP_DIR/$file" "app/$file"
-              echo "Restored: $file"
-            fi
-          done
+          bash scripts/sync-capacitor-mods.sh /tmp/upstream
 
       - name: Check for real changes
         id: check
         run: |
-          # Anything different from our committed baseline now?
           STATUS=$(git status --porcelain -- app/ | grep -v node_modules || true)
           if [ -z "$STATUS" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
@@ -143,7 +96,9 @@ jobs:
       - name: Install dependencies
         if: steps.check.outputs.has_changes == 'true'
         working-directory: app
-        run: npm install
+        run: |
+          npm install
+          bash ../scripts/install-capacitor-deps.sh
 
       - name: Build web assets
         if: steps.check.outputs.has_changes == 'true'
@@ -191,9 +146,7 @@ jobs:
 
             ### What was done
             - Pulled latest source from upstream
-            - Backed up Capacitor modifications
-            - Copied upstream files
-            - Restored Capacitor modifications
+            - Applied our Capacitor modifications via 3-way merge
             - Rebuilt web assets
             - Synced to Android
             - Verified APK builds successfully

@@ -7,14 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Force rebuild current upstream release'
+        description: 'Force rebuild even if no new upstream changes'
         required: false
         default: 'false'
         type: boolean
 
 permissions:
   contents: write
-  pull-requests: write
 
 env:
   UPSTREAM_URL: https://github.com/mayswind/ezbookkeeping.git
@@ -23,7 +22,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout current repo
@@ -31,29 +30,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest upstream release
+      - name: Get upstream status
         id: upstream
         run: |
-          RESPONSE=$(curl -s "https://api.github.com/repos/mayswind/ezbookkeeping/releases/latest")
-          TAG=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))")
-          if [ -z "$TAG" ]; then
-            echo "::error::Could not determine latest upstream release"
-            exit 1
-          fi
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "Latest upstream release: $TAG"
+          git ls-remote $UPSTREAM_URL refs/heads/main > /tmp/upstream_sha.txt
+          UPSTREAM_SHA=$(cut -f1 /tmp/upstream_sha.txt)
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+          echo "Upstream main HEAD: $UPSTREAM_SHA"
 
-      - name: Check if already released
+          # Latest upstream release tag (for naming / release notes)
+          RESPONSE=$(curl -s "https://api.github.com/repos/mayswind/ezbookkeeping/releases/latest")
+          LATEST_TAG=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || echo "")
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          echo "Latest upstream release: ${LATEST_TAG:-none}"
+
+      - name: Check if upstream main changed
         id: check
         run: |
-          # We tag our repo with "upstream-<tag>" after each release
-          EXISTING=$(git tag -l "${RELEASE_PREFIX}-${TAG}")
+          # We tag our repo with "upstream-<sha>" after each build
+          EXISTING=$(git tag -l "${RELEASE_PREFIX}-${UPSTREAM_SHA:0:12}")
           if [ -n "$EXISTING" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Version $TAG already released (tag: $EXISTING). Nothing to do."
+            echo "Upstream main $UPSTREAM_SHA already built (tag: $EXISTING). Nothing to do."
           else
             echo "skip=false" >> $GITHUB_OUTPUT
-            echo "New upstream version detected: $TAG"
+            echo "New upstream code detected: $UPSTREAM_SHA"
           fi
 
       - name: Setup Node.js
@@ -61,8 +62,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/package-lock.json
 
       - name: Setup Java 21
         if: steps.check.outputs.skip == 'false'
@@ -75,43 +74,13 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         uses: android-actions/setup-android@v3
 
-      - name: Clone upstream at release tag
+      - name: Clone upstream
         if: steps.check.outputs.skip == 'false'
         run: |
-          git clone --depth 1 --branch "$TAG" $UPSTREAM_URL /tmp/upstream
-          UPSTREAM_SHA=$(cd /tmp/upstream && git rev-parse --short HEAD)
-          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-          echo "Cloned upstream $TAG @ $UPSTREAM_SHA"
+          git clone --depth 1 $UPSTREAM_URL /tmp/upstream
+          echo "Cloned upstream at $UPSTREAM_SHA"
 
-      - name: Backup Capacitor modifications
-        if: steps.check.outputs.skip == 'false'
-        run: |
-          BACKUP_DIR="/tmp/backup_$(date +%s)"
-          mkdir -p "$BACKUP_DIR"
-
-          CUSTOM_FILES=(
-            "src/lib/capacitor.ts"
-            "src/MobileApp.vue"
-            "src/core/setting.ts"
-            "src/stores/setting.ts"
-            "src/views/mobile/transactions/EditPage.vue"
-            "src/views/mobile/ApplicationLockPage.vue"
-            "src/views/mobile/UnlockPage.vue"
-            "src/components/mobile/AIImageRecognitionSheet.vue"
-            "capacitor.config.ts"
-          )
-
-          for file in "${CUSTOM_FILES[@]}"; do
-            if [ -f "app/$file" ]; then
-              mkdir -p "$BACKUP_DIR/$(dirname "$file")"
-              cp "app/$file" "$BACKUP_DIR/$file"
-            fi
-          done
-
-          echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
-          echo "Backup saved to: $BACKUP_DIR"
-
-      - name: Copy upstream files
+      - name: Copy upstream files into app/
         if: steps.check.outputs.skip == 'false'
         run: |
           COPY_ITEMS=(
@@ -137,31 +106,17 @@ jobs:
             fi
           done
 
-      - name: Restore Capacitor modifications
+      - name: Apply Capacitor modifications (3-way merge)
         if: steps.check.outputs.skip == 'false'
         run: |
-          for file in \
-            "src/lib/capacitor.ts" \
-            "src/MobileApp.vue" \
-            "src/core/setting.ts" \
-            "src/stores/setting.ts" \
-            "src/views/mobile/transactions/EditPage.vue" \
-            "src/views/mobile/ApplicationLockPage.vue" \
-            "src/views/mobile/UnlockPage.vue" \
-            "src/components/mobile/AIImageRecognitionSheet.vue" \
-            "capacitor.config.ts"
-          do
-            if [ -f "$BACKUP_DIR/$file" ]; then
-              mkdir -p "$(dirname "app/$file")"
-              cp "$BACKUP_DIR/$file" "app/$file"
-              echo "Restored: $file"
-            fi
-          done
+          bash scripts/sync-capacitor-mods.sh /tmp/upstream
 
       - name: Install dependencies
         if: steps.check.outputs.skip == 'false'
         working-directory: app
-        run: npm install
+        run: |
+          npm install
+          bash ../scripts/install-capacitor-deps.sh
 
       - name: Build web assets
         if: steps.check.outputs.skip == 'false'
@@ -201,14 +156,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore: sync upstream ezBookkeeping $TAG" || echo "No changes to commit"
+          git commit -m "chore: sync upstream ezBookkeeping $UPSTREAM_SHA" || echo "No changes to commit"
           git push origin HEAD:${{ github.ref_name }}
 
       - name: Tag release
         if: steps.check.outputs.skip == 'false'
         run: |
-          git tag "${RELEASE_PREFIX}-${TAG}"
-          git push origin "${RELEASE_PREFIX}-${TAG}"
+          git tag "${RELEASE_PREFIX}-${UPSTREAM_SHA:0:12}"
+          git push origin "${RELEASE_PREFIX}-${UPSTREAM_SHA:0:12}"
 
       - name: Create GitHub Release
         if: steps.check.outputs.skip == 'false'
@@ -218,7 +173,10 @@ jobs:
           cat > /tmp/release_notes.md <<'EOF'
           ## ezBookkeeping Android App
 
-          Automatically built from the latest [ezBookkeeping upstream release](https://github.com/mayswind/ezbookkeeping/releases).
+          Automatically built from the latest ezBookkeeping upstream code.
+
+          - **Upstream commit:** `{UPSTREAM_SHA}`
+          - **Upstream release:** `{LATEST_TAG}`
 
           ### Download
           - **{RELEASE_APK}** — Android debug APK (unsigned, sideload-friendly)
@@ -238,12 +196,12 @@ jobs:
           ---
           *Automated by GitHub Actions*
           EOF
-          sed -i "s/{RELEASE_APK}/${RELEASE_APK}/g" /tmp/release_notes.md
-          gh release create "${RELEASE_PREFIX}-${TAG}" \
+          sed -i "s/{RELEASE_APK}/${RELEASE_APK}/g; s/{UPSTREAM_SHA}/${UPSTREAM_SHA}/g; s/{LATEST_TAG}/${LATEST_TAG}/g" /tmp/release_notes.md
+          gh release create "${RELEASE_PREFIX}-${UPSTREAM_SHA:0:12}" \
             "$RELEASE_APK" \
-            --title "ezBookkeeping Android App ${TAG}" \
+            --title "ezBookkeeping Android App (upstream ${UPSTREAM_SHA:0:12})" \
             --notes-file /tmp/release_notes.md
 
       - name: Already up to date
         if: steps.check.outputs.skip == 'true'
-        run: echo "Latest upstream release already packaged. No action taken."
+        run: echo "Latest upstream code already packaged. No action taken."

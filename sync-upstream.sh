@@ -1,17 +1,17 @@
 #!/bin/bash
-# Sync upstream ezBookkeeping changes
+# Sync upstream ezBookkeeping changes locally.
 # Usage: ./sync-upstream.sh
 
 set -e
 
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPSTREAM_URL="https://github.com/mayswind/ezbookkeeping.git"
 UPSTREAM_DIR="/tmp/ezbookkeeping_upstream"
-APP_DIR="$(cd "$(dirname "$0")/app" && pwd)"
 
 echo "=== ezBookkeeping Upstream Sync ==="
 
 # Step 1: Clone or update upstream
-if [ -d "$UPSTREAM_DIR" ]; then
+if [ -d "$UPSTREAM_DIR/.git" ]; then
     echo "[1/4] Updating upstream clone..."
     cd "$UPSTREAM_DIR"
     git fetch --depth 1 origin main
@@ -25,41 +25,9 @@ fi
 UPSTREAM_COMMIT=$(git rev-parse --short HEAD)
 echo "       Upstream commit: $UPSTREAM_COMMIT"
 
-# Step 2: Show what changed
-echo "[2/4] Checking for changes in src/ ..."
-cd "$APP_DIR"
-CHANGED_FILES=$(git diff --name-only HEAD 2>/dev/null || true)
+# Step 2: Copy upstream files into app/
+echo "[2/4] Copying upstream files..."
 
-# Step 3: Backup our modifications
-echo "[3/4] Backing up custom modifications..."
-BACKUP_DIR="/tmp/ezbookkeeping_backup_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$BACKUP_DIR"
-
-# Files we modified (Capacitor integration)
-CUSTOM_FILES=(
-    "src/lib/capacitor.ts"
-    "src/MobileApp.vue"
-    "src/core/setting.ts"
-    "src/stores/setting.ts"
-    "src/views/mobile/transactions/EditPage.vue"
-    "src/views/mobile/ApplicationLockPage.vue"
-    "src/views/mobile/UnlockPage.vue"
-    "src/components/mobile/AIImageRecognitionSheet.vue"
-    "capacitor.config.ts"
-)
-
-for file in "${CUSTOM_FILES[@]}"; do
-    if [ -f "$APP_DIR/$file" ]; then
-        mkdir -p "$BACKUP_DIR/$(dirname "$file")"
-        cp "$APP_DIR/$file" "$BACKUP_DIR/$file"
-        echo "       Backed up: $file"
-    fi
-done
-
-# Step 4: Copy upstream files (excluding our custom files)
-echo "[4/4] Copying upstream changes..."
-
-# Files/dirs to copy from upstream
 COPY_ITEMS=(
     "src"
     "package.json"
@@ -77,43 +45,30 @@ COPY_ITEMS=(
 
 for item in "${COPY_ITEMS[@]}"; do
     if [ -e "$UPSTREAM_DIR/$item" ]; then
-        rm -rf "$APP_DIR/$item"
-        cp -r "$UPSTREAM_DIR/$item" "$APP_DIR/$item"
+        rm -rf "$ROOT_DIR/app/$item"
+        cp -r "$UPSTREAM_DIR/$item" "$ROOT_DIR/app/$item"
         echo "       Updated: $item"
     fi
 done
 
-# Step 5: Restore our modifications
-echo ""
-echo "=== Restoring Capacitor modifications ==="
-for file in "${CUSTOM_FILES[@]}"; do
-    if [ -f "$BACKUP_DIR/$file" ]; then
-        mkdir -p "$(dirname "$APP_DIR/$file")"
-        cp "$BACKUP_DIR/$file" "$APP_DIR/$file"
-        echo "       Restored: $file"
-    fi
-done
+# Step 3: Apply our Capacitor modifications via 3-way merge
+echo "[3/4] Applying Capacitor modifications (3-way merge)..."
+bash "$ROOT_DIR/scripts/sync-capacitor-mods.sh" "$UPSTREAM_DIR"
 
-# Step 6: Install dependencies and rebuild
-echo ""
-echo "=== Reinstalling dependencies ==="
-cd "$APP_DIR"
+# Step 4: Install dependencies and rebuild
+echo "[4/4] Reinstalling dependencies and rebuilding..."
+cd "$ROOT_DIR/app"
 npm install 2>&1 | tail -3
-
-echo ""
-echo "=== Rebuilding web assets ==="
+bash "$ROOT_DIR/scripts/install-capacitor-deps.sh"
 NODE_ENV=production npx vite build 2>&1 | tail -5
-
-echo ""
-echo "=== Syncing to Android ==="
 npx cap sync android 2>&1 | tail -5
 
 echo ""
 echo "=== Done! ==="
 echo "Upstream commit: $UPSTREAM_COMMIT"
-echo "Backup saved to: $BACKUP_DIR"
 echo ""
-echo "Next steps:"
-echo "  1. Test the app to verify everything works"
-echo "  2. Check for any merge conflicts in modified files"
-echo "  3. If issues, restore from backup: $BACKUP_DIR"
+echo "If the 3-way merge reported conflicts, resolve them in app/ then re-run:"
+echo "  bash scripts/sync-capacitor-mods.sh $UPSTREAM_DIR"
+echo ""
+echo "After a successful sync, update the merge base for future syncs:"
+echo "  bash scripts/update-vendor-base.sh $UPSTREAM_DIR"
