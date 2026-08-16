@@ -14,7 +14,7 @@ echo "=== ezBookkeeping Upstream Sync ==="
 if [ -d "$UPSTREAM_DIR" ]; then
     echo "[1/4] Updating upstream clone..."
     cd "$UPSTREAM_DIR"
-    git fetch origin main
+    git fetch --depth 1 origin main
     git reset --hard origin/main
 else
     echo "[1/4] Cloning upstream..."

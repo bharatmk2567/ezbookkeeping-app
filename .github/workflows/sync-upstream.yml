@@ -54,30 +54,11 @@ jobs:
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           echo "Upstream latest: $UPSTREAM_SHA"
 
-      - name: Check for changes
-        id: check
-        run: |
-          cd app
-          # Compare upstream src/ with our src/
-          DIFF=$(diff -rq /tmp/upstream/src src/src 2>/dev/null | grep -v "node_modules" || true)
-          DIFF_PKG=$(diff /tmp/upstream/package.json package.json 2>/dev/null || true)
-          
-          if [ -z "$DIFF" ] && [ -z "$DIFF_PKG" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "No upstream changes detected"
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "Changes detected:"
-            echo "$DIFF"
-            echo "$DIFF_PKG"
-          fi
-
-      - name: Backup modifications
-        if: steps.check.outputs.has_changes == 'true'
+      - name: Backup Capacitor modifications
         run: |
           BACKUP_DIR="/tmp/backup_$(date +%s)"
           mkdir -p "$BACKUP_DIR"
-          
+
           CUSTOM_FILES=(
             "src/lib/capacitor.ts"
             "src/MobileApp.vue"
@@ -89,19 +70,18 @@ jobs:
             "src/components/mobile/AIImageRecognitionSheet.vue"
             "capacitor.config.ts"
           )
-          
+
           for file in "${CUSTOM_FILES[@]}"; do
             if [ -f "app/$file" ]; then
               mkdir -p "$BACKUP_DIR/$(dirname "$file")"
               cp "app/$file" "$BACKUP_DIR/$file"
             fi
           done
-          
+
           echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
           echo "Backup saved to: $BACKUP_DIR"
 
       - name: Copy upstream files
-        if: steps.check.outputs.has_changes == 'true'
         run: |
           COPY_ITEMS=(
             "src"
@@ -117,7 +97,7 @@ jobs:
             "contributors.json"
             "third-party-dependencies.json"
           )
-          
+
           for item in "${COPY_ITEMS[@]}"; do
             if [ -e "/tmp/upstream/$item" ]; then
               rm -rf "app/$item"
@@ -126,28 +106,39 @@ jobs:
             fi
           done
 
-      - name: Restore modifications
-        if: steps.check.outputs.has_changes == 'true'
+      - name: Restore Capacitor modifications
         run: |
-          CUSTOM_FILES=(
-            "src/lib/capacitor.ts"
-            "src/MobileApp.vue"
-            "src/core/setting.ts"
-            "src/stores/setting.ts"
-            "src/views/mobile/transactions/EditPage.vue"
-            "src/views/mobile/ApplicationLockPage.vue"
-            "src/views/mobile/UnlockPage.vue"
-            "src/components/mobile/AIImageRecognitionSheet.vue"
+          for file in \
+            "src/lib/capacitor.ts" \
+            "src/MobileApp.vue" \
+            "src/core/setting.ts" \
+            "src/stores/setting.ts" \
+            "src/views/mobile/transactions/EditPage.vue" \
+            "src/views/mobile/ApplicationLockPage.vue" \
+            "src/views/mobile/UnlockPage.vue" \
+            "src/components/mobile/AIImageRecognitionSheet.vue" \
             "capacitor.config.ts"
-          )
-          
-          for file in "${CUSTOM_FILES[@]}"; do
+          do
             if [ -f "$BACKUP_DIR/$file" ]; then
               mkdir -p "$(dirname "app/$file")"
               cp "$BACKUP_DIR/$file" "app/$file"
               echo "Restored: $file"
             fi
           done
+
+      - name: Check for real changes
+        id: check
+        run: |
+          # Anything different from our committed baseline now?
+          STATUS=$(git status --porcelain -- app/ | grep -v node_modules || true)
+          if [ -z "$STATUS" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No upstream changes detected. Repository is up to date."
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Changes detected:"
+            echo "$STATUS"
+          fi
 
       - name: Install dependencies
         if: steps.check.outputs.has_changes == 'true'
@@ -186,17 +177,18 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: sync upstream ezBookkeeping ($UPSTREAM_SHA)"
-          branch: "sync/upstream-${UPSTREAM_SHA }}"
+          commit-message: "chore: sync upstream ezBookkeeping (${{ env.UPSTREAM_SHA }})"
+          branch: "sync/upstream-${{ env.UPSTREAM_SHA }}"
           delete-branch: true
+          base: main
           title: "chore: sync upstream ezBookkeeping (${{ env.UPSTREAM_SHA }})"
           body: |
             ## Upstream Sync
-            
+
             This PR syncs changes from [ezBookkeeping](https://github.com/mayswind/ezbookkeeping) upstream.
-            
+
             **Upstream commit:** `${{ env.UPSTREAM_SHA }}`
-            
+
             ### What was done
             - Pulled latest source from upstream
             - Backed up Capacitor modifications
@@ -205,7 +197,7 @@ jobs:
             - Rebuilt web assets
             - Synced to Android
             - Verified APK builds successfully
-            
+
             ### Modified files preserved
             - `src/lib/capacitor.ts` — Native feature bridge
             - `src/MobileApp.vue` — Capacitor initialization
@@ -215,20 +207,18 @@ jobs:
             - `src/views/mobile/ApplicationLockPage.vue` — Biometric toggle
             - `src/views/mobile/UnlockPage.vue` — Biometric unlock
             - `src/components/mobile/AIImageRecognitionSheet.vue` — Native camera for AI
-            
+
             ### Testing
             - [ ] Build succeeds
             - [ ] APK generated
             - [ ] All features work
             - [ ] No merge conflicts
-            
+
             ---
             *Automated sync by GitHub Actions*
           labels: |
             sync
             upstream
-          reviewers: |
-            ${{ github.actor }}
 
       - name: No changes detected
         if: steps.check.outputs.has_changes == 'false'
